@@ -744,14 +744,14 @@ if st.session_state.users:
     st.header("📄 Content Analysis")
     
     # Select users for content analysis
-    suspicious_users = [u for u in st.session_state.users if detector.is_suspicious(u.get('email', ''))[0]]
+    suspicious_users_list = [u for u in st.session_state.users if detector.is_suspicious(u.get('email', ''))[0]]
     
-    if suspicious_users:
+    if suspicious_users_list:
         selected_user_ids = st.multiselect(
             "Select suspicious users to analyze their content:",
-            options=[u['id'] for u in suspicious_users],
-            default=[u['id'] for u in suspicious_users[:5]],  # Default to first 5
-            format_func=lambda x: f"ID {x}: {next(u['name'] for u in suspicious_users if u['id'] == x)} ({next(u['email'] for u in suspicious_users if u['id'] == x)})"
+            options=[u['id'] for u in suspicious_users_list],
+            default=[u['id'] for u in suspicious_users_list[:5]],  # Default to first 5
+            format_func=lambda x: f"ID {x}: {next(u['name'] for u in suspicious_users_list if u['id'] == x)} ({next(u['email'] for u in suspicious_users_list if u['id'] == x)})"
         )
         
         if selected_user_ids and st.button("📊 Analyze Content"):
@@ -767,6 +767,15 @@ if st.session_state.users:
                     posts = wp_api.get_all_user_posts(user_id)
                     media = wp_api.get_user_media(user_id)
                     
+                    content_analysis[user_id] = {
+                        'posts': posts,
+                        'media': media,
+                        'post_count': len(posts),
+                        'media_count': len(media)
+                    }
+                    
+                except Exception as e:
+                    st.error(f"Failed to analyze user {user_id}: {str(e)}")
                     content_analysis[user_id] = {
                         'posts': [],
                         'media': [],
@@ -800,7 +809,7 @@ if st.session_state.users:
                 # Detailed breakdown
                 content_details = []
                 for user_id, data in content_analysis.items():
-                    user_info = next((u for u in suspicious_users if u['id'] == user_id), {})
+                    user_info = next((u for u in suspicious_users_list if u['id'] == user_id), {})
                     content_details.append({
                         'user_id': user_id,
                         'name': user_info.get('name', ''),
@@ -840,9 +849,9 @@ if st.session_state.users:
     """, unsafe_allow_html=True)
     
     # User selection for deletion
-    suspicious_users = [u for u in st.session_state.users if detector.is_suspicious(u.get('email', ''))[0]]
+    suspicious_users_del = [u for u in st.session_state.users if detector.is_suspicious(u.get('email', ''))[0]]
     
-    if suspicious_users:
+    if suspicious_users_del:
         st.subheader("👤 Select Users for Deletion")
         
         # Bulk selection options
@@ -850,7 +859,7 @@ if st.session_state.users:
         
         with col1:
             if st.button("Select All Suspicious"):
-                st.session_state.selected_for_deletion = [u['id'] for u in suspicious_users]
+                st.session_state.selected_for_deletion = [u['id'] for u in suspicious_users_del]
         
         with col2:
             if st.button("Select No Content"):
@@ -871,7 +880,7 @@ if st.session_state.users:
                 # Select users registered in last 30 days (if date available)
                 recent_cutoff = datetime.now() - timedelta(days=30)
                 recent_ids = []
-                for u in suspicious_users:
+                for u in suspicious_users_del:
                     reg_date = u.get('date_registered', '')
                     if reg_date:
                         try:
@@ -888,7 +897,7 @@ if st.session_state.users:
         
         # Individual user selection
         deletion_candidates = []
-        for user in suspicious_users:
+        for user in suspicious_users_del:
             user_content_info = ""
             if hasattr(st.session_state, 'content_analysis') and user['id'] in st.session_state.content_analysis:
                 analysis = st.session_state.content_analysis[user['id']]
@@ -926,7 +935,7 @@ if st.session_state.users:
                 for i, user_id in enumerate(selected_user_ids):
                     status_text.text(f"Simulating deletion for user {user_id}...")
                     
-                    user_info = next((u for u in suspicious_users if u['id'] == user_id), {})
+                    user_info = next((u for u in suspicious_users_del if u['id'] == user_id), {})
                     
                     try:
                         # Simulate getting posts and media
@@ -1047,7 +1056,7 @@ if st.session_state.users:
                             'timestamp': datetime.now().isoformat(),
                             'wp_site': wp_site,
                             'total_users_scanned': len(st.session_state.users),
-                            'suspicious_users_found': len(suspicious_users),
+                            'suspicious_users_found': len(suspicious_users_del),
                             'users_selected_for_deletion': len(selected_user_ids)
                         },
                         'detection_rules': {
@@ -1118,7 +1127,7 @@ if st.session_state.users:
                             }
                             
                             try:
-                                user_info = next((u for u in suspicious_users if u['id'] == user_id), {})
+                                user_info = next((u for u in suspicious_users_del if u['id'] == user_id), {})
                                 
                                 # Get user content
                                 posts = wp_api.get_all_user_posts(user_id)
@@ -1385,13 +1394,4 @@ st.markdown("""
 if st.sidebar.button("🧹 Clear All Session Data"):
     for key in list(st.session_state.keys()):
         del st.session_state[key]
-    st.rerun()d] = {
-                        'posts': posts,
-                        'media': media,
-                        'post_count': len(posts),
-                        'media_count': len(media)
-                    }
-                    
-                except Exception as e:
-                    st.error(f"Failed to analyze user {user_id}: {str(e)}")
-                    content_analysis[user_i
+    st.rerun()
