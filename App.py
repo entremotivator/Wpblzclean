@@ -183,66 +183,205 @@ def validate_url(url: str) -> bool:
         return False
 
 def test_wp_connection(site: str, username: str, password: str, verify_ssl: bool = True) -> Tuple[bool, str]:
-    """Test WordPress API connection"""
+    """Test WordPress API connection with comprehensive diagnostics"""
     try:
         if not validate_url(site):
             return False, "Invalid URL format"
         
+        site = site.rstrip('/')
         auth = HTTPBasicAuth(username, password)
-        headers = {"User-Agent": "wp-security-suite/2.0"}
+        headers = {
+            "User-Agent": "wp-security-suite/2.0",
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+        }
         
-        # Test basic connectivity
-        response = requests.get(
-            f"{site.rstrip('/')}/wp-json/wp/v2/users/me",
+        # Step 1: Test if REST API is available
+        try:
+            api_response = requests.get(
+                f"{site}/wp-json/wp/v2",
+                headers=headers,
+                verify=verify_ssl,
+                timeout=timeout_seconds
+            )
+            
+            if api_response.status_code == 404:
+                return False, "WordPress REST API not found. Check if REST API is enabled and URL is correct."
+            elif api_response.status_code >= 500:
+                return False, f"Server error {api_response.status_code}. Contact your hosting provider."
+                
+        except requests.exceptions.ConnectionError:
+            return False, "Cannot connect to WordPress site. Check URL and network connection."
+        
+        # Step 2: Test authentication with /users/me endpoint
+        me_response = requests.get(
+            f"{site}/wp-json/wp/v2/users/me",
             auth=auth,
             headers=headers,
             verify=verify_ssl,
             timeout=timeout_seconds
         )
         
-        if response.status_code == 200:
-            user_info = response.json()
+        if me_response.status_code == 401:
+            error_data = me_response.json() if me_response.content else {}
+            error_code = error_data.get('code', 'unknown')
+            
+            if error_code == 'rest_not_logged_in':
+                return False, """Authentication failed. Please check:
+                
+1. **Username**: Use your WordPress admin username (not email)
+2. **Password**: Use an Application Password, not your regular password
+   
+**To create Application Password:**
+- Go to: Users → Your Profile → Application Passwords
+- Enter name: 'API Access' 
+- Click 'Add New Application Password'
+- Copy the generated password (format: xxxx xxxx xxxx xxxx)
+
+**Common Issues:**
+- Application Passwords may be disabled by your host
+- Two-factor authentication plugins may interfere
+- Some security plugins block REST API access"""
+            
+            return False, f"Authentication error ({error_code}): {error_data.get('message', 'Invalid credentials')}"
+        
+        elif me_response.status_code == 403:
+            return False, "Access forbidden. Your user account may not have sufficient permissions."
+        
+        elif me_response.status_code == 200:
+            user_info = me_response.json()
+            
+            # Step 3: Test users endpoint access
+            users_response = requests.get(
+                f"{site}/wp-json/wp/v2/users",
+                auth=auth,
+                headers=headers,
+                verify=verify_ssl,
+                timeout=timeout_seconds,
+                params={'per_page': 1}  # Just test with 1 user
+            )
+            
+            if users_response.status_code == 401:
+                return False, "Authentication failed when accessing users endpoint."
+            elif users_response.status_code == 403:
+                return False, "Access denied to users endpoint. Your account needs 'list_users' capability."
+            elif users_response.status_code != 200:
+                return False, f"Users endpoint error: HTTP {users_response.status_code}"
+            
+            # Check user capabilities
             capabilities = user_info.get('capabilities', {})
+            user_roles = user_info.get('roles', [])
             
             # Check if user has required permissions
-            required_caps = ['list_users', 'delete_users', 'edit_users']
-            missing_caps = [cap for cap in required_caps if not capabilities.get(cap, False)]
+            required_caps = ['list_users', 'edit_users', 'delete_users']
+            missing_caps = []
             
-            if missing_caps:
-                return False, f"Missing required capabilities: {', '.join(missing_caps)}"
+            for cap in required_caps:
+                if not capabilities.get(cap, False):
+                    missing_caps.append(cap)
             
-            return True, f"Connected successfully as {user_info.get('name', username)}"
+            # If missing capabilities but user is admin, it might still work
+            if missing_caps and 'administrator' not in user_roles:
+                return False, f"""Missing required capabilities: {', '.join(missing_caps)}
+                
+Your user needs these WordPress capabilities:
+- list_users: View user accounts
+- edit_users: Modify user accounts  
+- delete_users: Delete user accounts
+
+Solution: Make sure your user has 'Administrator' role or custom role with these capabilities."""
+            
+            return True, f"✅ Connected as {user_info.get('name', username)} (Role: {', '.join(user_roles)})"
+        
         else:
-            return False, f"HTTP {response.status_code}: {response.text[:100]}"
+            return False, f"Unexpected response: HTTP {me_response.status_code}"
             
-    except requests.exceptions.SSLError:
-        return False, "SSL certificate verification failed"
+    except requests.exceptions.SSLError as e:
+        return False, f"SSL certificate error: {str(e)}\nTry unchecking 'Verify SSL' if using development/staging site."
     except requests.exceptions.Timeout:
-        return False, "Connection timeout"
-    except requests.exceptions.ConnectionError:
-        return False, "Connection failed - check URL and network"
+        return False, f"Connection timeout after {timeout_seconds} seconds. Try increasing timeout or check server response time."
+    except requests.exceptions.ConnectionError as e:
+        return False, f"Connection failed: {str(e)}\nCheck if the WordPress site URL is correct and accessible."
     except Exception as e:
         return False, f"Connection error: {str(e)}"
 
+    with st.expander("🔧 Troubleshooting Authentication Issues"):
+        st.markdown("""
+        **If you're getting authentication errors:**
+        
+        ### 1. WordPress Application Password Setup
+        - Go to: **Users → Your Profile → Application Passwords**
+        - Enter name: `API Access` or `Mass Cleaner`
+        - Click **Add New Application Password**
+        - Copy the generated password (format: `xxxx xxxx xxxx xxxx`)
+        - Use your **WordPress username** (not email) with this password
+        
+        ### 2. Common Issues & Solutions
+        
+        **"You are not currently logged in" Error:**
+        - ❌ Don't use your regular WordPress password
+        - ✅ Use Application Password instead
+        - ❌ Don't use email address as username
+        - ✅ Use actual WordPress username
+        
+        **Application Passwords Not Available:**
+        - Some hosting providers disable this feature
+        - Contact your host to enable Application Passwords
+        - Alternative: Use plugins like "JWT Authentication for REST API"
+        
+        **REST API Disabled:**
+        - Check if a security plugin is blocking REST API
+        - Temporarily disable security plugins for testing
+        - Whitelist your IP if using security restrictions
+        
+        **Permission Issues:**
+        - Ensure your user has Administrator role
+        - Some custom roles may lack required capabilities
+        - Required capabilities: `list_users`, `edit_users`, `delete_users`
+        
+        ### 3. Testing Steps
+        1. Test with a simple REST API call in browser:
+           `https://yoursite.com/wp-json/wp/v2/users/me`
+        2. You should be prompted for credentials
+        3. Use username + application password
+        4. Should return your user info in JSON format
+        """)
+
 # Test connection
 if wp_site and wp_username and wp_app_password:
-    if st.sidebar.button("🔌 Test Connection"):
-        with st.spinner("Testing connection..."):
-            success, message = test_wp_connection(wp_site, wp_username, wp_app_password, use_ssl_verify)
-            if success:
-                st.sidebar.success(message)
-                st.session_state.connection_status = True
-            else:
-                st.sidebar.error(message)
-                st.session_state.connection_status = False
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        if st.button("🔌 Test Connection", use_container_width=True):
+            with st.spinner("Testing connection..."):
+                success, message = test_wp_connection(wp_site, wp_username, wp_app_password, use_ssl_verify)
+                if success:
+                    st.success(message)
+                    st.session_state.connection_status = True
+                else:
+                    st.error(message)
+                    st.session_state.connection_status = False
+    
+    with col2:
+        if st.button("🌐 Test API Endpoint", use_container_width=True):
+            """Quick test of basic API availability"""
+            try:
+                test_url = f"{wp_site.rstrip('/')}/wp-json/wp/v2"
+                response = requests.get(test_url, timeout=10, verify=use_ssl_verify)
+                if response.status_code == 200:
+                    st.success("✅ REST API is available")
+                else:
+                    st.error(f"❌ REST API test failed: HTTP {response.status_code}")
+            except Exception as e:
+                st.error(f"❌ Cannot reach REST API: {str(e)}")
     
     # Show connection status
     if st.session_state.connection_status:
-        st.sidebar.success("✅ Connected")
+        st.success("✅ Connected and authenticated")
     else:
-        st.sidebar.warning("⚠️ Not tested")
+        st.warning("⚠️ Not tested or authentication failed")
 else:
-    st.sidebar.warning("⚠️ Configure connection settings")
+    st.warning("⚠️ Configure connection settings")
 
 # Main content area
 if not wp_site or not wp_username or not wp_app_password:
@@ -254,7 +393,11 @@ class WordPressAPI:
     def __init__(self, site: str, username: str, password: str, verify_ssl: bool = True, timeout: int = 30):
         self.site = site.rstrip('/')
         self.auth = HTTPBasicAuth(username, password)
-        self.headers = {"User-Agent": "wp-security-suite/2.0"}
+        self.headers = {
+            "User-Agent": "wp-security-suite/2.0",
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+        }
         self.verify_ssl = verify_ssl
         self.timeout = timeout
         self.session = requests.Session()
@@ -269,13 +412,35 @@ class WordPressAPI:
             'timeout': self.timeout
         })
         
-        response = self.session.request(method, url, **kwargs)
-        
-        if enable_logging:
-            logger.info(f"{method} {url} - Status: {response.status_code}")
+        try:
+            response = self.session.request(method, url, **kwargs)
             
-        response.raise_for_status()
-        return response
+            if enable_logging:
+                logger.info(f"{method} {url} - Status: {response.status_code}")
+            
+            # Handle common authentication errors
+            if response.status_code == 401:
+                error_data = response.json() if response.content else {}
+                error_message = error_data.get('message', 'Authentication failed')
+                raise requests.exceptions.HTTPError(
+                    f"Authentication failed: {error_message}. Please check your credentials.",
+                    response=response
+                )
+            
+            response.raise_for_status()
+            return response
+            
+        except requests.exceptions.Timeout:
+            raise requests.exceptions.Timeout(f"Request timed out after {self.timeout} seconds")
+        except requests.exceptions.ConnectionError as e:
+            raise requests.exceptions.ConnectionError(f"Connection failed: {str(e)}")
+        except requests.exceptions.HTTPError as e:
+            if response.status_code == 404:
+                raise requests.exceptions.HTTPError(f"Endpoint not found: {url}", response=response)
+            elif response.status_code == 403:
+                raise requests.exceptions.HTTPError("Access forbidden. Check user permissions.", response=response)
+            else:
+                raise e
     
     def get_users(self, page: int = 1, per_page: int = 100, **params) -> List[Dict]:
         """Fetch users with pagination"""
@@ -306,7 +471,7 @@ class WordPressAPI:
                 time.sleep(rate_limit_delay / 1000)  # Convert ms to seconds
                 
             except requests.HTTPError as e:
-                if e.response.status_code == 400:  # No more pages
+                if e.response and e.response.status_code == 400:  # No more pages
                     break
                 raise e
                 
@@ -324,22 +489,33 @@ class WordPressAPI:
         page = 1
         
         while True:
-            batch = self.get_user_posts(user_id, page=page)
-            if not batch:
-                break
-            posts.extend(batch)
-            if len(batch) < 50:
-                break
-            page += 1
-            time.sleep(rate_limit_delay / 1000)
+            try:
+                batch = self.get_user_posts(user_id, page=page)
+                if not batch:
+                    break
+                posts.extend(batch)
+                if len(batch) < 50:
+                    break
+                page += 1
+                time.sleep(rate_limit_delay / 1000)
+            except requests.HTTPError as e:
+                if e.response and e.response.status_code == 400:
+                    break
+                raise e
             
         return posts
     
     def get_user_media(self, user_id: int) -> List[Dict]:
         """Get media files uploaded by user"""
         params = {'author': user_id, 'per_page': 100}
-        response = self._make_request('GET', 'media', params=params)
-        return response.json()
+        try:
+            response = self._make_request('GET', 'media', params=params)
+            return response.json()
+        except requests.HTTPError as e:
+            # Media endpoint might not be available or user has no media
+            if e.response and e.response.status_code in [403, 404]:
+                return []
+            raise e
     
     def delete_post(self, post_id: int, force: bool = True) -> Dict:
         """Delete a post"""
